@@ -1,0 +1,7 @@
+{
+  "name": "Storm Club Jeans",
+  "description": "A premium wholesale fashion website for Storm Club Jeans, featuring a dark luxury aesthetic, product catalog, and distributor information.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
