@@ -49,7 +49,7 @@ const Admin: React.FC<AdminProps> = ({ products, goHome }) => {
 
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
-    if (username === 'admin' && password === 'stormclub2024') {
+    if (username === 'amjad' && password === '030805') {
       setIsAuthenticated(true);
       localStorage.setItem('isAdminAuthenticated', 'true');
       setError('');
