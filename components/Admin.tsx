@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Product } from '../types';
 import { Trash2, Plus, LogOut, ArrowLeft, Image as ImageIcon, Upload, Loader2, Camera } from 'lucide-react';
-import { db } from '../firebase';
+import { db, storage } from '../firebase';
 import { collection, addDoc, deleteDoc, doc, updateDoc } from 'firebase/firestore';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 
 interface AdminProps {
   products: Product[];
@@ -87,24 +88,20 @@ const Admin: React.FC<AdminProps> = ({ products, goHome }) => {
 
   const uploadImageToCloudinary = async (imageDataUrl: string): Promise<string | null> => {
     if (!cloudName || !cloudinaryUploadPreset) {
-      return null; // Cloudinary is not configured, skip uploading
+      return null;
     }
-
     try {
       const formData = new FormData();
       formData.append('file', imageDataUrl);
       formData.append('upload_preset', cloudinaryUploadPreset);
-
       const response = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
         method: 'POST',
         body: formData,
       });
-
       if (!response.ok) {
         console.error('Cloudinary upload failed', await response.text());
         return null;
       }
-
       const data = await response.json();
       return data.secure_url as string;
     } catch (error) {
@@ -113,47 +110,95 @@ const Admin: React.FC<AdminProps> = ({ products, goHome }) => {
     }
   };
 
-  // NEW: Compress and Encode Image locally
-  const processFile = (file: File) => {
-    setIsUploading(true);
-    const reader = new FileReader();
-    reader.readAsDataURL(file);
-    
-    reader.onload = (event) => {
-      const img = new Image();
-      img.src = event.target?.result as string;
-      
-      img.onload = () => {
-        // Create a canvas to resize/compress the image
-        const canvas = document.createElement('canvas');
-        const MAX_WIDTH = 800; // Resize to max 800px width to keep DB light
-        const scaleSize = MAX_WIDTH / img.width;
-        
-        // Calculate new dimensions
-        // If image is smaller than max, keep original size
-        const newWidth = img.width > MAX_WIDTH ? MAX_WIDTH : img.width;
-        const newHeight = img.width > MAX_WIDTH ? img.height * scaleSize : img.height;
+  const dataURLtoBlob = (dataUrl: string): Blob => {
+    const arr = dataUrl.split(',');
+    const mime = (arr[0].match(/:(.*?);/) || [])[1] || 'image/jpeg';
+    const bstr = atob(arr[1]);
+    let n = bstr.length;
+    const u8 = new Uint8Array(n);
+    while (n--) u8[n] = bstr.charCodeAt(n);
+    return new Blob([u8], { type: mime });
+  };
 
+  const uploadImageToStorage = async (blob: Blob): Promise<string | null> => {
+    if (!storage) return null;
+    try {
+      const path = `products/${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
+      const storageRef = ref(storage, path);
+      await uploadBytes(storageRef, blob, { contentType: 'image/jpeg' });
+      return await getDownloadURL(storageRef);
+    } catch (err) {
+      console.error('Firebase Storage upload error', err);
+      return null;
+    }
+  };
+
+  const processFile = (file: File) => {
+    if (!file.type.startsWith('image/')) {
+      alert('Please select an image file (e.g. JPG, PNG).');
+      return;
+    }
+    setIsUploading(true);
+    setBase64Image(null);
+    setPreviewUrl(null);
+    const reader = new FileReader();
+    reader.onerror = () => {
+      setIsUploading(false);
+      alert('Could not read the file. Please try another image.');
+    };
+    reader.onload = (event) => {
+      const dataUrl = event.target?.result as string;
+      if (!dataUrl) {
+        setIsUploading(false);
+        return;
+      }
+      const img = new Image();
+      img.onerror = () => {
+        setIsUploading(false);
+        alert('Invalid or corrupted image. Please try another file.');
+      };
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        // Keep under Firestore 1MB doc limit: compress so base64 stays safe (~500KB)
+        const MAX_WIDTH = 520;
+        const scale = MAX_WIDTH / img.width;
+        const newWidth = img.width > MAX_WIDTH ? MAX_WIDTH : img.width;
+        const newHeight = img.width > MAX_WIDTH ? Math.round(img.height * scale) : img.height;
         canvas.width = newWidth;
         canvas.height = newHeight;
-        
         const ctx = canvas.getContext('2d');
-        ctx?.drawImage(img, 0, 0, newWidth, newHeight);
-        
-        // Compress to JPEG at 60% quality
-        const compressedBase64 = canvas.toDataURL('image/jpeg', 0.6);
-        
+        if (!ctx) {
+          setIsUploading(false);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, newWidth, newHeight);
+        let compressedBase64 = canvas.toDataURL('image/jpeg', 0.5);
+        // If still too large, shrink again (Firestore doc limit 1MB)
+        const MAX_BASE64 = 700000;
+        if (compressedBase64.length > MAX_BASE64) {
+          const scale2 = Math.sqrt(MAX_BASE64 / compressedBase64.length);
+          const w2 = Math.max(200, Math.round(newWidth * scale2));
+          const h2 = Math.max(200, Math.round(newHeight * scale2));
+          canvas.width = w2;
+          canvas.height = h2;
+          ctx.drawImage(img, 0, 0, w2, h2);
+          compressedBase64 = canvas.toDataURL('image/jpeg', 0.45);
+        }
         setBase64Image(compressedBase64);
         setPreviewUrl(compressedBase64);
         setIsUploading(false);
       };
+      img.src = dataUrl;
     };
+    reader.readAsDataURL(file);
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      processFile(e.target.files[0]);
+    const file = e.target.files?.[0];
+    if (file) {
+      processFile(file);
     }
+    e.target.value = '';
   };
 
   const handleAddProduct = async (e: React.FormEvent) => {
@@ -171,17 +216,21 @@ const Admin: React.FC<AdminProps> = ({ products, goHome }) => {
     setIsUploading(true);
 
     try {
-      // IMAGE HANDLING
-      // 1. If Cloudinary is configured, try uploading the compressed image there
-      // 2. If upload fails or Cloudinary is not configured, fall back to:
-      //    - compressed base64 (if present), or
-      //    - manually entered URL, or
-      //    - a random placeholder image
+      // IMAGE HANDLING: Cloudinary → Firebase Storage → base64 → manual URL → placeholder
       let imageUrl = formData.image || '';
 
       if (base64Image) {
-        const uploadedUrl = await uploadImageToCloudinary(base64Image);
+        let uploadedUrl = await uploadImageToCloudinary(base64Image);
+        if (!uploadedUrl && storage) {
+          uploadedUrl = await uploadImageToStorage(dataURLtoBlob(base64Image));
+        }
         imageUrl = uploadedUrl || base64Image || imageUrl;
+        // Firestore document limit 1MB; base64 in doc must stay under ~800KB
+        if (!uploadedUrl && imageUrl.length > 800000) {
+          setIsUploading(false);
+          alert('Image too large for database. Please choose a smaller photo or paste an image URL instead.');
+          return;
+        }
       }
 
       if (!imageUrl) {
@@ -443,7 +492,6 @@ const Admin: React.FC<AdminProps> = ({ products, goHome }) => {
                   onChange={handleFileSelect}
                   accept="image/*"
                   className="hidden"
-                  capture="environment" // Hints mobile browsers to use camera
                 />
 
                 <div className="grid grid-cols-2 gap-4">

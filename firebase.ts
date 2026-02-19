@@ -1,5 +1,6 @@
 import { initializeApp, getApp, getApps } from 'firebase/app';
 import { getFirestore } from 'firebase/firestore';
+import { getStorage } from 'firebase/storage';
 
 // ------------------------------------------------------------------
 // FIREBASE INITIALIZATION (FIRESTORE DATABASE)
@@ -58,4 +59,14 @@ try {
 }
 
 // Export only db, we don’t need storage in this project
-export { db };
+let storage: ReturnType<typeof getStorage> | null = null;
+if (db && firebaseConfig.storageBucket) {
+  try {
+    const app = getApps().length > 0 ? getApp() : null;
+    if (app) storage = getStorage(app);
+  } catch (_) {
+    // Storage optional
+  }
+}
+
+export { db, storage };
